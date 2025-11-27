@@ -1,0 +1,527 @@
+---
+title: "GLMs Lab: Count & Proportion Data"
+subtitle: "A full workflow with interpretation, diagnostics, and model simplification"
+author: "Emil Paul Bogs"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    self_contained: yes
+    toc: true
+    toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,error = TRUE)
+set.seed(123)
+library(tidyverse)
+library(MASS)        # glm.nb, stepAIC
+```
+## Learning goals
+
+-   Choose and fit appropriate GLMs for **count** (Poisson / Negative Binomial) and **proportion** (Binomial / quasi-Binomial) data.\
+-   Interpret coefficients: **rate ratios** (counts) and **odds ratios** (proportions).\
+-   Assess fit via **deviance, dispersion**, residual diagnostics, and **model simplification** (LRT, AIC).\
+-   Make predictions and visualise with **ggplot2**.
+
+::: callout-note
+**What you’ll submit**:
+
+An HTML version of this exercise by the end of the practial session
+:::
+
+## Lab Timeline (2 hours)
+
+| Time | Activity |
+|---------------|---------------------------------------------------------|
+| 0:00–0:15 | **Introduction to GLMs** – recap linear model limits, why we need GLMs. |
+| 0:15–0:35 | **Exploratory Data Analysis (EDA)** – plotting counts and proportions with ggplot2. |
+| 0:35–1:05 | **Count data example (Negative Binomial GLM)**: simulate / load data, fit Poisson, check overdispersion, refit with `glm.nb()`, interpret coefficients, plot fitted vs observed. |
+| 1:05–1:25 | **Proportional data example (Binomial GLM)**: fit model using `glm(..., family=binomial)`, interpret log-odds & odds ratios, check residuals, plot fitted probabilities with CIs. |
+| 1:25–1:40 | **Model simplification & comparison**: use `anova()`, `drop1()`, and AIC for model selection. |
+| 1:40–1:50 | **Diagnostics**: residual vs fitted plots, dispersion checks, discussion of overdispersion and quasi families. |
+| 1:50–2:00 | **Wrap-up**: Key takeaways, when to use Poisson, Negative Binomial, Binomial/Quasi-Binomial, interpretation of multiplicative vs additive effects. |
+
+## Part A — Count data (≈ 60 min)
+
+### A1. Simulate “roadkills”-style counts
+
+::: {.alert .alert-info}
+**Task.**
+
+Create a simulation that generates synthetic bird count data based on three environmental predictors:
+
+1)  `OPEN.L`: Percentage of open land (0-100%)
+2)  `D.PAR`K`: Distance to nearest park (0-5000 meters)
+3)  `L.WAT.C`: Length of nearby watercourses (0-5 km)
+
+**Your Mission**
+
+***Step 1*: Set up the simulation parameters**
+
+Generate data for 600 observation sites
+Create realistic ranges for each predictor variable using appropriate random distributions
+
+***Step 2*: Define the ecological relationships**
+
+The true relationship follows this pattern:
+
+1)  More open land → fewer birds (coefficient: -0.010)
+2)  Greater distance to parks → fewer birds (coefficient: -0.00012)
+3)  More watercourse length → more birds (coefficient: +0.18)
+4)  Baseline log-abundance: 1.2
+
+***Step 3*: Generate realistic count data**
+
+Use the linear predictor to calculate expected abundance
+Add ecological realism by incorporating overdispersion ($\theta = 4$)
+Generate final bird counts using an appropriate count distribution
+
+***Step 4*: Organize and explore your data**
+
+Combine all variables into a clean data frame
+Examine the structure and summary of your simulated dataset
+:::
+
+```{r}
+# Simulate predictors
+# Step 1: Simulation setup
+set.seed(123)  # For reproducible results
+n <- 600       # Number of sites - 600
+
+# Step 2: Generate predictor variables
+OPEN.L <- runif(n, 0, 100)     # Hint: uniform distribution, 0 to 100
+D.PARK <- runif(n, 0, 5000)    # Hint: uniform distribution, 0 to 5000
+L.WAT.C <- runif(n, 0, 5)    # Hint: uniform distribution, 0 to 5
+
+# Step 3: Create the ecological model # Linear predictor combining all effects
+eta <- 1.2 - 0.010 * OPEN.L - 0.00012 * D.PARK  + 0.18 * L.WAT.C   
+                # Beta_OPEN.L = 0.010
+                # Beta_D.PARK = 0.00012
+                # Beta_L.WAT.C = 0.18  
+                                  
+mu <- exp(eta)         # Transform eta to expected count scale
+theta <- 4             # Overdispersion parameter (4)
+
+# Step 4: Generate observed counts
+TOT.N <- rnbinom(n, size = theta, mu = mu)      # Hint: use a random negative binomial distribution
+
+# Step 5: Create final dataset merging TOT.N, OPEN.L, D.PARK, & L.WAT.C
+datC <- tibble(TOT.N, OPEN.L, D.PARK, L.WAT.C)
+glimpse(datC)
+datC
+```
+
+### A2. Poisson GLM, dispersion check, quasi-Poisson
+
+::: {.alert .alert-info}
+
+**Task.**
+
+Fit a Poisson GLM as a baseline; compute dispersion. If dispersion >> 1, fit a quasi-Poisson to obtain robust SEs (note: no AIC for quasi-families).
+
+**Your Mission**
+
+***Step 1*: Fit a baseline Poisson GLM**
+
+Use your simulated bird count data (TOT.N) with all three environmental predictors to establish a starting model.
+
+***Step 2*: Check for overdispersion**
+
+Calculate the dispersion parameter by comparing residual deviance to degrees of freedom. A value >> 1 indicates overdispersion.
+
+***Step 3*:* Apply quasi-Poisson correction if needed**
+
+If overdispersion is detected, fit a quasi-Poisson model to obtain robust standard errors that account for extra variability.
+
+***Step 4*: Compare model results**
+
+Examine how overdispersion correction affects coefficient estimates, standard errors, and statistical significance
+
+:::
+
+```{r}
+# Fit Poisson GLM
+m_pois <- glm(TOT.N ~ OPEN.L + D.PARK + L.WAT.C, 
+              family = poisson(), 
+              data = datC)
+
+# Examine the results
+summary(m_pois)
+
+# Calculate dispersion parameter
+disp_pois <- m_pois$deviance / m_pois$df.residual
+print(paste("Dispersion parameter:", round(disp_pois, 2)))
+
+# Fit quasi-Poisson GLM
+m_qp <- glm(TOT.N ~ OPEN.L + D.PARK + L.WAT.C, 
+            family = quasipoisson(), 
+            data = datC)
+
+# Compare results
+summary(m_qp)
+
+# Extract coefficients and SEs
+pois_coef <- summary(m_pois)$coefficients[, 1:2]
+qp_coef <- summary(m_qp)$coefficients[, 1:2]
+
+# Create comparison
+comparison <- data.frame(
+  Predictor = rownames(pois_coef),
+  Poisson_Coef = pois_coef[, 1],
+  Poisson_SE = pois_coef[, 2],
+  QuasiPois_Coef = qp_coef[, 1],
+  QuasiPois_SE = qp_coef[, 2],
+  SE_Inflation = qp_coef[, 2] / pois_coef[, 2]
+)
+
+print(comparison)
+```
+
+::: {.alert .alert-success}
+**Question**
+
+1)  **Model Selection**: When would you choose quasi-Poisson over Poisson?
+*When the overdispersion is high. But it often doesn't help. Thats why we use diffrent models going on.*
+
+2)  **Limitations**: Why can't you calculate AIC for quasi-families?
+*The quasi-poisson model doesn't use likelihood so it can't calculate AIC.*
+
+3)  **Alternatives**: What other approaches could handle overdispersion? (*Hint*: negative binomial)
+*Negative binomial generalised linear models, adress the problem. As we can see underneath the overdispersion is lowered.By modelling the findings in a different way it models the extra variance so it doesn't increase the variance.*
+
+*Biological Interpretation:*
+
+1)  **Which environmental factor has the strongest effect on bird counts?**
+*L.WAT.C is the strongest environmental factor, but the OPEN.L should scale in higher percentiles quite strongly as it is a percentage scale. The Z value in total numbers is actually highest for OPEN.L, closely followed by L.WAT.C. But each number has a stronger effect for L.WAT.C.*
+
+3)  **How do you interpret the coefficient for `D.PARK`?**
+*D.Park is the weakest environmental factor. As a location is further away from a park the less birds are killed on roads.* 
+
+:::
+
+### A3. Negative Binomial GLM & comparison
+
+
+
+::: {.alert .alert-info}
+
+**Task.**
+
+Fit a Negative Binomial GLM and compare to Poisson using AIC. Prefer NB if it provides a better likelihood-penalised fit.
+
+**Your Mission**
+
+***Step 1*: Fit a Negative Binomial GLM**
+
+Use the `glm.nb()` function to fit a negative binomial model that explicitly accounts for overdispersion by estimating a dispersion parameter.
+
+***Step 2*: Examine the model summary**
+
+Review the coefficient estimates, standard errors, and the estimated theta (dispersion) parameter to understand how NB differs from Poisson.
+
+***Step 3*: Compare models using AIC**
+
+Calculate AIC values for both Poisson and Negative Binomial models to determine which provides better model fit penalized for complexity.
+
+***Step 4*: Make an informed model choice**
+
+Select the preferred model based on AIC comparison and biological interpretability of results.
+:::
+
+```{r}
+library(MASS)  # Required for glm.nb()
+
+m_nb <- glm.nb(TOT.N ~ OPEN.L + D.PARK + L.WAT.C,
+              data = datC)
+summary(m_nb)
+
+# Compare models using AIC
+AIC(m_pois, m_nb)
+```
+
+::: {.alert .alert-success}
+
+**Questions**
+
+1. **Theta parameter**: What is the estimated theta ($\theta$) value in your negative binomial model? How does this compare to the true value ($\theta = 4$) used in your simulation?
+
+*Its 4.018, its slightly bigger than the true value of 4. Its pretty close to the true value of for and terfore we can be confident in the model.*
+
+2. **Standard errors**: Compare the standard errors between the Poisson and Negative Binomial models. Which model has larger standard errors and why?
+
+*The Negative Binomial standard errors are all bigger then the standard errors of the Poisson model. I guess as you explained the binomial model takes the number of how often it takes until it finds the right one, while the Poisson counts whats actually there and thereby maybe is to optimistic and oversees errors. Thereby the amount of mistakes is higher for nbm and so the standard error is higher.*
+
+3. **AIC comparison**: Which model has the lower AIC value? What does this tell you about model fit?
+
+*m_nb has a much lower AIC and thereby seems to be the better fitted model.*
+
+4. **Coefficient interpretation**: Are the coefficient signs and magnitudes similar between Poisson and NB models? What does this suggest about the robustness of your ecological conclusions?
+
+*They are pretty close but in general the nb coefficients are stronger. The significans seems to be better for the poisson modell. And the standard errors are higher for the nb as said before. As Poisson is not accounting for extra variance resulting from overdispersion, thereby the fit is worse and so the higher significans and lower standard errors can be explained. *
+
+5. **Model choice**: Based on your AIC comparison, which model would you choose for inference and why?
+
+*m_nb because it has a way lower AIC.*
+
+6. **Practical implications**: How might using the wrong model (Poisson vs. NB) affect your conclusions about which environmental factors significantly influence bird abundance?
+
+*As said before the wrong model can overestimate the effects of certain coefficients while underestimating others. In this case the poisson moddel seems to be the wrong model, as it doesnt account for the variance stemming from overdispersion. And thereby assuming smaller error margins then they are in reality bigger, as the NB better estimates.*
+:::
+
+### A4. Model simplification (drop-one, stepAIC)
+
+::: {.alert .alert-info}
+**Task.**
+
+Simplify the NB model: inspect drop-one Chi-square tests, then apply stepAIC to seek a parsimonious model.
+
+**Your Mission**
+
+***Step 1: Conduct drop-one tests***
+
+Use `drop1()` with Chi-square tests to evaluate the individual contribution of each predictor when removed from the full model.
+
+***Step 2: Apply automated model selection***
+
+Use `stepAIC()` to systematically search for the most parsimonious model by comparing AIC values across different predictor combinations.
+
+***Step 3: Examine the final simplified model***
+
+Review the summary of the selected model to understand which predictors were retained and their statistical significance.
+
+***Step 4: Interpret coefficients on the natural scale***
+
+Transform log-scale coefficients to rate ratios (multiplicative effects) for easier ecological interpretation.
+:::
+
+```{r}
+# Step 1: Perform drop-one Chi-square tests
+drop1(m_nb, test = "Chisq")    # Test individual predictor contributions
+
+# Step 2: Apply stepwise AIC model selection  
+
+m_nb_step <- stepAIC(m_nb, trace = T)    # Find most parsimonious model
+                                          # trace = FALSE suppresses output
+
+# Step 3: Examine the simplified model
+summary(m_nb_step)    # Review final model structure and significance
+
+# Step 4: Calculate rate ratios (multiplicative effects)
+exp(coef(m_nb_step))    # Transform coefficients to natural scale
+                  # exp() converts log-effects to multiplicative effects
+```
+
+::: {.alert .alert-success}
+
+**Questions**
+
+## Interpretation Questions
+
+1. **Drop-one results**: Which predictor(s) show the highest Chi-square values in the drop-one test? What does this indicate about their importance?
+
+*Its highest for OPEN.L, as a low P(>chi), while having the same Df for all Coefficients, stands for a high Chi-sqr and therfore for the highest important environmental coefficent.*
+
+2. **Model selection outcome**: Did stepAIC retain all three predictors, or was the model simplified? Which variables (if any) were dropped?
+
+*Yes all three predictors were retained, so no simplification was done because all of them were to significant.*
+
+3. **AIC improvement**: Compare the AIC of the final stepped model with the original full model. Is there evidence that simplification improved the model?
+
+*Thereby no simplification and resulting no lowering of the AIC was reached.*
+
+4. **Rate ratio interpretation**: Looking at the `exp(coef())` output, how do you interpret the multiplicative effects? For example, what happens to bird abundance for every 1% increase in open land?
+
+*For every 1% the killing number decreases by the factor 0.9903065.*
+
+5. **Ecological significance**: Which environmental factor has the strongest multiplicative effect on bird abundance? How would you translate this into management recommendations?
+
+*Eventhough OPEN.L has the biggest effect on explaining the model, L.WAT.C has the strongest multiplicative effect on bird abundance by increasing the killing rate by 1.2... .*
+
+6. **Statistical vs. biological significance**: Are all retained predictors both statistically significant (p < 0.05) and ecologically meaningful? How do you distinguish between the two?
+
+*Yes all of the retained coefficients are statistically significant thats why they were retained, they also all have an ecological meaning ofcourse the strength differs between them.*
+:::
+
+### A5. Predictions (response scale) & CI plot
+
+::: {.alert .alert-info}
+
+**Task.**
+
+Produce fitted means and 95% confidence bands on the response scale for a key covariate (hold others at medians); plot observed counts + fitted curve.
+
+**Your Mission**
+
+***Step 1: Create a prediction grid***
+
+Generate a sequence of values for your focal predictor (`OPEN.L`) while holding other predictors at their median values to isolate the effect of interest.
+
+***Step 2: Generate model predictions***
+
+Use the simplified model to predict bird counts across the range of open land percentages, including standard errors for uncertainty quantification.
+
+***Step 3: Transform predictions to response scale***
+
+Convert log-scale predictions and confidence intervals back to the count scale for meaningful interpretation.
+
+***Step 4: Create a publication-ready plot***
+
+Combine observed data points with model predictions and confidence bands to visualize the relationship.
+:::
+
+```{r}
+# Step 1: Create prediction grid for focal variable
+gridC <- tibble(
+  OPEN.L = seq(min(datC$OPEN.L), max(datC$OPEN.L), length.out = 300),  # Sequence of 300 elements from min to max OPEN.L
+  D.PARK = median(datC$D.PARK),                                        # Hold D.PARK at median value
+  L.WAT.C = median(datC$L.WAT.C, na.rm = TRUE)                         # Hold L.WAT.C at median value
+)
+
+# Step 2: Generate predictions with standard errors
+pl <- predict(m_nb_step, newdata = gridC, type = "link", se.fit = T)        # Get link-scale predictions + SEs
+                                                                            # type = "link" gives log-scale
+                                                                            # se.fit = TRUE includes SEs
+
+# Step 3: Transform to response scale with confidence intervals
+gridC <- gridC |>
+  mutate(
+    mu = exp(pl$fit),                           # Transform fitted values to count scale
+    lo = exp(pl$fit - 1.96 * pl$se.fit),        # Lower 95% CI boundary
+    hi = exp(pl$fit + 1.96 * pl$se.fit)         # Upper 95% CI boundary
+  )
+
+# Step 4: Create the prediction plot
+ggplot(datC, aes(x = OPEN.L, y = TOT.N)) +                                         # Plot original data
+  geom_point(alpha = 0.4) +                                          # Add semi-transparent points
+  geom_ribbon(data = gridC, aes(x = OPEN.L, ymin = lo, ymax = hi), 
+              alpha = 0.2, 
+              fill = "green",
+              inherit.aes = FALSE) +                    # Add confidence band
+  geom_line(data = gridC, aes(x = OPEN.L, y = mu), 
+            linewidth = 1, inherit.aes = FALSE) +                  # Add fitted line
+  labs(title = "Predicting Birds: fitted counts vs % open land",
+       x = "Open Land",
+       y = "Birds") +                                                  # Add informative labels
+  theme_minimal()
+```
+
+::: {.alert .alert-success}
+
+**Questions**
+
+1. **Prediction grid setup**: Why do we hold D.PARK and L.WAT.C at their median values when creating predictions for OPEN.L? What would happen if we used different values?
+
+*So that we can see the effect of OPEN.L excluded. Diffrent values would shift the focus of the prediction.*
+
+2. **Link vs. response scale**: Why do we first predict on the "link" scale and then transform using `exp()`, rather than predicting directly on the response scale?
+
+**
+
+3. **Confidence interval interpretation**: What do the confidence bands around the fitted line represent? How would you explain this to a non-statistician?
+
+*The Confidance intervall shows where 95% of the observations are located, here focused on the ones just effected by OPEN.L.*
+
+4. **Ecological pattern**: Describe the relationship between open land percentage and bird counts shown in your plot. Does this match your biological expectations?
+
+*The Bird count is increasing with decreasing Bird kills as shown in the plot this relationship is stronger for smaller open land percentages.*
+
+5. **Model fit assessment**: Looking at how well the fitted line and confidence bands capture the observed data points, would you say this model provides a good fit? What might you look for to assess this?
+
+*In the beginning i thought its not a good fit beacuase many points seem to not be in the confidence intervall. But the plot shows all points also the ones effected by the other coefficients which our prediction dioesnt account for as we set them beforehand to their median. SO to check for if enough points are located in the confidence intevall we would have to exclude the other points.*
+
+6. **Practical applications**: How could you use this plot to inform urban planning decisions about bird conservation?
+
+*I would tell them that already a few percentage of more open land could save a lot of birds while investing in nearly 100% of open land is not really efficient as the effect slows down.*
+:::
+
+### A6. Diagnostics: residuals & influence
+
+::: {.alert .alert-info}
+
+**Task.**
+
+Inspect deviance/Pearson residuals vs fitted and influence diagnostics. Look for structure (misspecification) and high-leverage points.
+
+**Your Mission**
+
+***Step 1: Extract diagnostic measures***
+
+Create a comprehensive dataset containing fitted values, residuals, and influence measures from your negative binomial model to assess model assumptions and identify problematic observations.
+
+***Step 2: Create residuals vs fitted plot***
+
+Plot deviance residuals against fitted values to check for patterns that might indicate model misspecification, non-linearity, or heteroscedasticity.
+
+***Step 3: Examine influence diagnostics***
+
+Create a leverage vs Cook's distance plot to identify observations that have high influence on model parameters or are potential outliers.
+
+***Step 4: Interpret diagnostic patterns***
+
+Assess whether the model adequately captures the data structure and identify any observations requiring further investigation.
+:::
+
+```{r}
+# Step 1: Extract all diagnostic measures into a tibble
+diag_nb <- tibble(
+  fitted  = fitted(m_nb_step),                               # Extract fitted values (predicted means)
+  devres  = residuals(m_nb_step, type = "deviance"),         # Extract deviance residuals
+  pearson = residuals(m_nb_step, type = "pearson"),          # Extract Pearson residuals  
+  hat     = hatvalues(m_nb_step),                            # Extract leverage values (diagonal of hat matrix)
+  cooks   = cooks.distance(m_nb_step)                        # Extract Cook's distance (influence measure)
+)
+
+# Step 2: Create deviance residuals vs fitted values plot
+ggplot(diag_nb, aes(fitted, devres)) +                       # Plot fitted vs deviance residuals
+  geom_hline(yintercept = 0, linetype = "dashed") +          # Add horizontal reference line at y=0 (dashed)
+  geom_point(alpha = 0.5) +                                  # Add semi-transparent points (0.5)
+  geom_smooth(se = FALSE) +                                  # Add smooth trend line without confidence bands
+  labs(title = "NB GLM: deviance residuals vs fitted", 
+       x = "Fitted  values", 
+       y = "Deviance residuals") +                               # Add descriptive labels
+  theme_minimal()
+
+# Step 3: Create leverage vs Cook's distance plot
+ggplot(diag_nb, aes(hat, cooks)) +                      # Plot leverage vs Cook's distance
+  geom_point(alpha = 0.5) +                       # Add semi-transparent points (0.6)
+  labs(title = "Negative Binomial: leverage vs Cook's distance", 
+       x = "Leverage", 
+       y = "Cook's Distance") +                               # Add descriptive labels
+  theme_minimal()
+```
+
+::: {.alert .alert-success}
+
+**Questions**
+
+1. **Residual types**: What's the difference between deviance and Pearson residuals, and why might we prefer deviance residuals for GLM diagnostics?
+
+*Deviance residuals dont have a realtionship between the mean and varaince as other residuals like the pearson so that they are better suited for GLMs.*
+
+2. **Residuals vs fitted interpretation**: In your deviance residuals plot, what pattern would indicate a well-fitting model? What patterns would suggest problems?
+
+*A normal distributed pattern would indicate a well fitting model, as the seen pattern is left skewed we have problems.*
+
+3. **Reference line importance**: Why do we include a horizontal dashed line at y=0 in the residuals plot, and what does it represent?
+
+*If the modeled line is close to 0 it shows a good distribution of residuals, and thereby the assumption of normality of variance would have been given if the line is around -0.5 and + 0.5 of deviance residuals.*
+
+4. **Leverage interpretation**: What does high leverage indicate about an observation, and why should we be concerned about high-leverage points?
+
+*The leverage is looking for outliers, so high points for leverage show outliers. Whcih can lead to problems in the model and can make it less well fitted. If reasonable outliers can be excluded.*
+
+5. **Cook's distance threshold**: Cook's distance measures overall influence. What general threshold is often used to identify potentially problematic observations, and why?
+
+*For big datasets bigger then 1 can be used as an threshold for finding problematic influential points. As we dont want some points to have a stronger effect on the model as others but a well distributed effect of datapoints on the model. Here we have no points over 0.3 and thereby it doesnt seem like a problem. But this could also be due to the fact that our dataset is not really big.*
+
+6. **Diagnostic integration**: How would you use both plots together to identify the most concerning observations? What would be the "worst case" combination of leverage and Cook's distance?
+
+*If both are really high thsi would be the most problematic as strong outliers influencing strongly the model would dter the result strongly.*
+
+7. **Model adequacy assessment**: Based on your diagnostic plots, would you conclude that the negative binomial GLM adequately fits your simulated data? What evidence supports this conclusion?
+
+*I dont really think so as the residuals are not normally distributed and we have some strong outliers. Nevertheless its the best fitting model we used today as the ACI analysis shows.*
+
+:::

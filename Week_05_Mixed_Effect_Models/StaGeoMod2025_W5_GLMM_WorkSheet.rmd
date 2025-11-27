@@ -1,0 +1,404 @@
+---
+title: "Hands-on Practical: Generalised Linear Mixed Models GLMMs"
+subtitle: "StatGeoMod2025 — 1.5-hour practical"
+author: "Emil Bogs"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: yes
+    toc: true
+    toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+---
+
+## Setup
+
+```{r setup, echo=FALSE, message=FALSE}
+# Runing options
+knitr::opts_chunk$set(echo = TRUE,error=TRUE, message=FALSE)
+
+# Load required packages
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+theme_set(theme_bw(base_size = 12))
+
+# Set seed for reproducible results
+set.seed(123)
+```
+
+## Part A – Loading and Exploring the Data (15 minutes)
+
+### Task A1: Load the Data
+
+**What you'll do**: Load the owl data and convert some variables to the right type for analysis.
+
+```{r A1-LoadData}
+# Load the data file - fill in the correct function name
+owls <- read_table(file = "Owls.txt")
+
+# Convert categorical variables to factors (R's way of handling categories)
+owls <- owls %>%
+  mutate(
+    FoodTreatment = factor(owls$FoodTreatment),
+    SexParent = factor(owls$SexParent),
+    Nest = factor(owls$Nest)
+  )
+
+# Look at the structure of our data
+summary(owls)
+
+# Count how many observations we have per nest
+nest <- owls %>%
+          count(Nest) %>%
+          arrange(desc(n)) %>%
+          print(n = 10)
+```
+
+**Questions to answer**:
+
+1. How many total observations do we have? 599
+2. How many different nests? 27
+3. Which nest has the most observations? Oleyes
+
+### Task A2: Transform the Response Variable
+
+**What you'll do**: Create a better version of our outcome variable for analysis.
+
+```{r A2-Transform}
+# Create log-transformed version (helps with normality)
+# We add 0.5 to handle any zero values
+owls <- owls %>%
+  mutate(logNeg = log(owls$SiblingNegotiation + 0.5))
+
+# Check if this transformation helps make data more normal
+ggplot(owls, aes(x = logNeg)) + 
+  geom_histogram(bins = 30) +
+  labs(title = "Distribution of Log-Transformed Negotiation Calls")
+
+# QQ plot to check normality
+qqnorm(owls$logNeg)
+qqline(owls$logNeg)
+```
+
+**Questions to answer**:
+
+1. Does the histogram look approximately bell-shaped? Everythin looks more bell shape but a big pillar of ~ 155 counts around -0.6 logNeg.
+2. In the QQ plot, do most points fall close to the line? The Points fall around the line for 0.5 to 2.8 Sample Quantiles but over and under they are quite far away from the line.
+
+### Task A3: Visualize the Nesting Structure
+
+**What you'll do**: See how different nests respond to arrival time.
+
+```{r A3-Visualize}
+# Plot showing relationship between arrival time and negotiation for each nest
+ggplot(owls, aes(x = ArrivalTime, y = logNeg, color = Nest)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  guides(color = "none") +  # Hide legend (too many nests)
+  labs(
+    x = "Arrival Time", 
+    y = "Log(Negotiation Calls)",
+    title = "Each colored line represents a different nest"
+  )
+```
+
+**Questions to answer**:
+
+1. Do all nests show similar slopes (parallel lines)? No a lot of them have diffrent slopes some positive some negative.
+2. Do some nests have consistently higher negotiation levels than others? Yes some of them are consistenly high some increase over time to the same amount but somejust stay way lower.
+3. What does this suggest about treating all observations as independent? It seems as if the Nests have an effect on the Response variable so we cant really treat them as independent.
+
+## Part B – Why We Need Mixed Models (20 minutes)
+
+### Task B1: The Wrong Way - Ignoring Nesting
+
+**What you'll do**: See what happens if we ignore the fact that observations come from different nests.
+
+```{r B1-IgnoreNesting}
+# Fit a regular linear model that ignores nesting
+simple_model <- lm(logNeg ~ ArrivalTime + FoodTreatment + SexParent + BroodSize, 
+                   data = owls)
+
+summary(simple_model)
+```
+
+**Question to answer**:
+
+1. What is the coefficient for ArrivalTime? -0.14318
+
+### Task B2: Another Wrong Way - Separate Analysis for Each Nest
+
+**What you'll do**: Fit separate models for each nest, then try to combine results.
+
+```{r B2-SeparateModels}
+# Fit separate regression for each nest
+nest_results <- owls %>%
+  group_by(Nest) %>%
+  do({
+    # Fit model for this nest only
+    model <- lm(logNeg ~ ArrivalTime, data = .)
+    
+    # Extract key information
+    data.frame(
+      slope = coef(model)["ArrivalTime"],
+      intercept = coef(model)["(Intercept)"],
+      n_obs = nrow(.)
+    )
+  }) %>%
+  ungroup()
+
+# Look at the results
+print(nest_results, n = 15)
+
+# Now try to relate slopes to food treatment
+# First, get treatment for each nest
+nest_treatments <- owls %>%
+  distinct(FoodTreatment, Nest)
+
+# Combine with our slope results
+combined_results <- nest_results %>%
+  left_join(nest_treatments, by = "Nest")
+
+# Test if slopes differ by treatment
+slope_model <- lm(slope ~ FoodTreatment, data = combined_results)
+summary(slope_model)
+```
+
+**Questions to answer**:
+
+1. Do all nests have the same number of observations? No they have diffrent amounts of observations.
+2. Why might this be a problem when trying to compare slopes?  Because we compare less accurate Data with more accurate Data.
+3. What information are we throwing away by doing separate analyses? The fact that they come from diffrent sample sizes. 
+
+## Part C – Mixed Effects Models: The Right Way (25 minutes)
+
+### Task C1: Random Intercept Model
+
+**What you'll do**: Fit a mixed model that allows each nest to have its own baseline level.
+
+```{r C1-RandomIntercept}
+# Fit mixed model with random intercepts for each nest
+# (1 | Nest) means "let each nest have its own intercept"
+model_ri <- lmer(logNeg ~ ArrivalTime + FoodTreatment + SexParent + BroodSize +
+                   (1 | Nest),
+                 data = owls, 
+                 REML = TRUE)
+
+summary(model_ri)
+```
+
+**Questions to answer**:
+
+1. What is the fixed effect coefficient for ArrivalTime? -0.147
+2. What is the variance between nests? 0.2181
+3. What is the residual variance? 1.3113
+
+### Task C2: Random Intercept + Slope Model
+
+**What you'll do**: Allow each nest to have both its own baseline AND its own response to arrival time.
+
+```{r C2-RandomSlope}
+# Fit mixed model with random intercepts AND slopes
+# (1 + ArrivalTime | Nest) means "let each nest have its own intercept AND slope for ArrivalTime"
+model_ris <- lmer(logNeg ~ ArrivalTime + FoodTreatment + SexParent + BroodSize +
+                    (1 + ArrivalTime | Nest),
+                  data = owls, 
+                  REML = TRUE)
+
+summary(model_ris)
+```
+
+**Questions to answer**:
+
+1. What is the correlation between random intercepts and slopes? -0.942
+2. Is this correlation positive or negative? its negative
+3. What does this correlation mean biologically? ?
+
+### Task C3: Compare the Two Models
+
+**What you'll do**: Statistically test which model fits better.
+
+```{r C3-CompareModels}
+# Compare the two models
+anova(model_ri, model_ris)
+```
+
+**Questions to answer**:
+
+1. What is the p-value for the comparison? 0.002917
+2. Which model is significantly better? model_ris, because of a lower AIC and so on.
+3. Should we use random slopes or just random intercepts? Accordingly i think we should use random slopes
+
+## Part D – Understanding What Mixed Models Do (15 minutes)
+
+### Task D1: Calculate Intraclass Correlation (ICC)
+
+**What you'll do**: Find out how much observations within the same nest resemble each other.
+
+```{r D1-ICC}
+# Extract variance components of the mixed model model
+variance_components <- as.data.frame(VarCorr(model_ri))
+
+# Get between-NEST variance
+between_nest_var <- variance_components$vcov[variance_components$grp == "Nest"]
+
+# Get within-nest variance  of the mixed model mode
+within_nest_var <- sigma(model_ri)^2
+
+# Calculate ICC (Intraclass Correlation Coefficient)
+icc <- between_nest_var / (between_nest_var + within_nest_var)
+
+cat("ICC =", round(icc, 3),
+"\nThis means", round(icc * 100, 1), "% of variation is between nests")
+```
+
+**Questions to answer**:
+
+1. What is the ICC value? Is a percentage scale for showing the variation between nests.
+2. What percentage of variation is between nests? 14.3
+3. Is this a high or low level of clustering? ________
+
+### Task D2: Visualize Model Predictions
+
+**What you'll do**: See how the model makes predictions for population vs individual nests.
+
+```{r D2-Predictions}
+# Create data for predictions
+pred_data <- data.frame(
+  ArrivalTime = seq(min(owls$ArrivalTime), max(owls$ArrivalTime), length.out = 100),
+  FoodTreatment = factor("Deprived", levels = levels(owls$FoodTreatment)),
+  SexParent = factor("Male", levels = levels(owls$SexParent)),
+  BroodSize = median(owls$BroodSize)
+)
+
+# Population-level prediction (ignoring random effects)
+pred_data$population_fit <- predict(model_ris, newdata = pred_data, re.form = NA)
+
+# Create nest-specific predictions
+# Create the data frame first
+nest_data <- owls |>
+  distinct(Nest) |>
+  slice_head(n = 10) |>
+  crossing(pred_data)
+
+# Then add predictions
+nest_predictions <- nest_data |>
+  mutate(nest_fit = predict(model_ris, newdata = nest_data, re.form = ~ (1 + ArrivalTime | Nest)))
+
+# Plot
+ggplot() +
+  geom_point(data = owls, aes(ArrivalTime, logNeg), alpha = 0.3) +
+  geom_line(data = nest_predictions, 
+            aes(ArrivalTime, nest_fit, group = Nest), 
+            alpha = 0.5, color = "blue") +
+  geom_line(data = pred_data, 
+            aes(ArrivalTime, population_fit), 
+            size = 2, color = "red") +
+  labs(
+    title = "Blue lines = individual nests, Red line = population average",
+    x = "Arrival Time",
+    y = "Log(Negotiation Calls)"
+  )
+```
+
+**Questions to answer**:
+
+1. Do the blue lines (individual nests) vary around the red line (population average)? Yes some are in average lower some higher, some have similar tendencies others show positive trends so opposite to the average.
+2. Where is the variation between nests greatest - at early or late arrival times? The variation seems to be highest for late arrival times.
+
+## Part E – Model Checking (15 minutes)
+
+### Task E1: Check Model Assumptions
+
+**What you'll do**: Make sure our model is reasonable by checking the residuals.
+
+```{r E1-Diagnostics}
+# Choose our final model (let's assume random slopes was better)
+final_model <- model_ris
+
+# Get standardized residuals
+residuals <- resid(final_model, type = "pearson")
+
+# 1. Residuals vs fitted values
+fitted_values <- fitted(final_model)
+ggplot(data.frame(fitted = fitted_values, resid = residuals), 
+       aes(fitted, resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(title = "Residuals vs Fitted - should be random scatter around 0")
+
+# 2. Check normality of residuals
+qqnorm(residuals, main = "Q-Q Plot - points should follow the line")
+qqline(residuals)
+
+# 3. Check residuals by nest
+data.frame(Nest = owls$Nest, residuals = residuals) %>%
+  ggplot(aes(residuals, Nest)) +
+  geom_boxplot() +
+  coord_flip() +
+  geom_vline(xintercept = 0, color = "red") +
+  labs(title = "Residuals by nest - should be centered around 0")
+```
+
+**Questions to answer**:
+
+1. In the residuals vs fitted plot, do you see any clear patterns? The best scattering around o0 is for high fitted points and for very low because there are less Data Points. For fitted from 0 to 2 the scattering is highest.
+2. In the QQ plot, do the residuals appear normally distributed? Yes because they are close to the line and there are less points for high and low points. 
+3. Are there any nests with unusual residual patterns? Forel has a very low variance and is strongly lower then the other ones. And there is Chesard and Lully with strong outliers. 
+
+### Task E2: Look at Random Effects
+
+**What you'll do**: See which nests are unusual.
+
+```{r E2-RandomEffects}
+# Extract random effects (how each nest differs from average)
+random_effects <- ranef(final_model)
+
+# Look at first few
+head(random_effects$Nest)
+
+# Make a caterpillar plot of random intercepts
+re_data <- as.data.frame(random_effects$Nest) %>%
+  mutate(Nest = rownames(.)) %>%
+  rename(random_intercept ="(Intercept)")
+
+ggplot(re_data, aes(x = reorder(Nest, random_intercept), y = random_intercept)) +
+  geom_point() +
+  coord_flip() +
+  labs(
+    title = "Random intercepts - how much each nest differs from average",
+    x = "Nest",
+    y = "Random intercept (higher = more negotiation)"
+  )
+```
+
+**Questions to answer**:
+
+1. Which nest has the highest random intercept? Bochet
+2. Which nest has the lowest random intercept? Etrabloz
+3. What does a positive random intercept mean? That thos enests show a higher response from the chickens to feeding then the average nest. 
+
+## Summary Questions
+
+**Answer these questions based on your analysis**:
+
+1. Why can't we treat all observations as independent in this dataset?  
+   Because we have several Observations from the same nests but many diffrent nests so that if we wouldnt take the nest into account we would be biased by that. As the response differs between nests.
+
+2. What's the main advantage of mixed models over separate analyses for each nest?  
+   we can statistically ananlyse the effects of all the predictors for all the nests at the same time. and so compare their impacts on an average scale instead of analysing them all individually. SO that way our model is accounting for the problem of independence and we can take some avergae in the end. I f we would analyse them all seperatly and then take an average i think the bias of non-independence would still be there.
+
+3. What does the random intercept capture in our model?  
+   The random intercept catches the amount of response that the chicks give in each nest it can be compared to the populational mean to see if they show more or less then the mean. 
+
+4. What does the random slope capture in our model?  
+   If the Chicks show more response depending on the arrival time it can be compared to the populational mean to see if they are steeper or flater then the mean.
+
+5. Based on your model, does arrival time significantly affect sibling negotiation?  
+   Yes because model_ris is better in AIC significantly then model_ri and thereby the model_ris which includes the ArrivalTime can explain better the Data. And that significantly.
+
+6. Do you think the mixed model approach was necessary for this dataset? Why?  
+   Yes for sure as it the Dataset was not independent as explained in the first question.
+

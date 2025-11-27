@@ -1,0 +1,522 @@
+---
+title: "Week 6 Practical – Tree Based Models"
+subtitle: "Using CART, Random Forests, and Boosted Regression trees"
+author: "Student Name: Emil Bogs"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = TRUE)
+```
+
+## Setup
+
+**Packages used**: Base R for processing; `rpart`, `randomForest`, `gbm` for modelling; `ggplot2` for plots.
+
+```{r setup2, message=FALSE, warning=FALSE}
+# Load required packages
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(gbm)
+library(ggplot2)
+theme_set(theme_bw(base_size = 12))
+
+# Set seed for reproducible results
+set.seed(123)
+
+
+```
+
+## About the Data
+
+The objective is to predict deciduous broadleaf forests (TBMF) from climate variables, then map predictions globally. The dataset includes three files:
+
+- `BiomeData.csv` – Long-format table of sampled sites (≈500 points per vegetation type) with a unique ID and a biome label.
+- `ClimateData.csv` – Site-level climate variables with matching IDs.
+- `WorldClimateData.csv` – Global grid of climate variables for prediction (includes longitude, latitude, and the same predictor column names).
+
+---
+
+## Task 1 – Building a Presence–Absence Matrix for TBMF (10–12 min)
+
+**Objective:**
+
+The first task involves converting the long-format `BiomeData.csv` (containing site `ID` and `Biome` columns) into a **wide presence–absence** format for the focal biome (**Temperate Broadleaf & Mixed Forests**, abbreviated as TBMF). The goal is to create a binary response variable (1 = present, 0 = absent) for each unique location `ID`.
+
+
+```{r}
+# ============================================================================
+# STEP 1: LOAD DATA FILES
+# ============================================================================
+
+# Read biome dataset
+# HINT: stringsAsFactors keeps text as characters, [,-1] removes first column
+biome <- read.csv("BiomeData.csv", 
+                  stringsAsFactors = TRUE)[,-1]  # Remove column 1
+
+# Read climate dataset
+clim  <- read.csv("ClimateData.csv", 
+                  stringsAsFactors = TRUE)[,-1]
+
+# ============================================================================
+# STEP 2: CREATE PRESENCE-ABSENCE DATA FOR TBMF
+# ============================================================================
+
+# Extract all unique location IDs
+unique_ids <- unique(biome$ID)  # Get unique values from biome$ID
+
+# Create presence-absence indicator for TBMF
+# HINT: tapply() groups data and applies a function to each group
+# HINT: any() returns TRUE if at least one value is TRUE
+DBF_flag <- tapply(
+  # Check if biome name matches TBMF (creates TRUE/FALSE)
+  biome$BIOME.Name == "Temperate Broadleaf & Mixed Forests",  # Complete the biome name
+  
+  # Group by location ID
+  biome$ID,  # Which column contains the ID?
+  
+  # Function: Check if ANY row has TBMF, convert to integer (1/0)
+  function(x) as.integer(any(x))  # Use any() function
+)
+
+# Convert results to a data frame
+dbf_df <- data.frame(
+  ID = as.integer(names(DBF_flag)),    # Extract IDs from names
+  TBMF = as.integer(DBF_flag),         # Presence/absence values
+  row.names = NULL
+)
+
+# ============================================================================
+# STEP 3: VERIFY THE RESULTS
+# ============================================================================
+
+# Display frequency table
+# HINT: table() counts occurrences of each value
+table(dbf_df)  # Count TBMF values (0 and 1)
+```
+
+**Reflection Questions:**
+
+1. If some sites contain multiple biomes, why is `any()` a reasonable function for aggregating to presence–absence?
+Because it spits out all the Sites where TBMF is present or not so also the places were multiple biomes are present and one of them is TBMF it will show TBMF as present as it is.
+2. What challenges arise if the positive class ("Temperate Broadleaf & Mixed Forests") is very rare or very common in the dataset?
+Well get a non normal distributed dataset which brings problems for future statistics.
+3. Why is a site-level binary response preferable to a multi-class target for this exercise?
+Because we want to do a map based on the presence of these biomes we dont care about the other biomes so thereby we can just use this binary response also it makes the model simpler.
+
+---
+
+## Task 2 – Matching Climate Data to Sites (8–10 min)
+
+**Objective:**
+
+This task merges the site-level TBMF response variable with corresponding climate predictors using base R's `merge()` function. Rows with missing climate values are removed to ensure complete datasets for modeling.
+
+```{r}
+# ============================================================================
+# STEP 1: MERGE BIOME AND CLIMATE DATA
+# ============================================================================
+
+# Combine TBMF presence/absence with climate measurements
+# HINT: merge() combines data frames by a common column
+dat <- merge(
+  dbf_df,              # TBMF data frame (dbf_df)
+  clim,              # Climate data frame (clim)
+  by = "ID",       # Column name to match on (ID)
+  all.x = TRUE       # Keep all rows from first data frame? (TRUE/FALSE)
+)
+
+# ============================================================================
+# STEP 2: REMOVE ROWS WITH MISSING CLIMATE DATA
+# ============================================================================
+
+# Identify climate predictor columns
+# HINT: setdiff() finds elements in first set but not in second
+pred_cols <- setdiff(
+  colnames(dat),           # All column names from dat
+  c("ID", "TBMF")          # Columns to exclude (ID and TBMF)
+)
+
+# Keep only rows with complete climate data
+# HINT: complete.cases() returns TRUE for rows with no missing values
+dat <- dat[
+  complete.cases(dat[, pred_cols, drop = FALSE]),  # Check predictor columns
+]
+
+# Display dataset structure
+str(dat)  # Show structure of dat
+
+# ============================================================================
+# STEP 3: CHECK CLASS BALANCE
+# ============================================================================
+
+# Calculate proportion of absent (0) vs present (1)
+# HINT: prop.table() converts counts to proportions
+prop.table(table(dat$TBMF))  # Create table of TBMF column
+```
+
+**Reflection Questions:**
+
+1. When removing locations with incomplete climate data, what types of locations might be systematically excluded, and how could this bias the understanding of TBMF distribution?
+Locations where less research and data collection is being done which is probably more in less developed regions and therefore more on the south side of the earth. Percentage wise thereby a Bias towards having temperate regions in the northern Hemisphere could establish.
+2. Why is class balance important for evaluating model accuracy?
+I guess by class balance is meant that the diffrent predictor classes should have a similar n, this is important because the variances of the diffrent classes should be similar and if the datasets differ strongly in their size also probably their variance differs. 
+3. Which climate variables might be collinear, and why do tree-based models typically handle collinearity well?
+I dont know because the diffrent variables are not defined and so i cant expect anything
+
+---
+
+## Task 3a – CART: Fitting and Pruning (10 min)
+
+**Objective:**
+
+A decision tree model is built to predict TBMF presence/absence based on climate variables. Cross-validation is used to avoid overfitting, the tree is pruned to optimal size, decision rules are visualized, and the most important climate variables are identified.
+
+```{r}
+# ============================================================================
+# STEP 1: BUILD THE INITIAL CLASSIFICATION TREE
+# ============================================================================
+
+# Create model formula: TBMF ~ all climate variables
+# HINT: paste() with collapse joins elements with a separator
+form <- as.formula(
+        paste(
+                    "TBMF ~",                            # Response variable name
+                    paste(pred_cols, collapse = " + ")      # Join predictors with " + "
+             )
+                  )
+
+# Fit a Classification And Regression Tree
+# HINT: method = "class" for classification, cp = complexity parameter
+cart0 <- rpart(
+  form,                      # Formula (form)
+  data = dat,               # Dataset (dat)
+  method = "class",           # "class" for classification
+  xval = 10,               # Number of cross-validation folds (10)
+  control = rpart.control(
+    cp = 0.001                # Small value like 0.001 for large initial tree
+  )
+)
+
+# ============================================================================
+# STEP 2: FIND THE OPTIMAL TREE COMPLEXITY
+# ============================================================================
+
+# Display cross-validation results
+cp_tbl <- printcp(cart0)  # Print CP table for cart0
+
+# Find tree size with minimum CV error
+# HINT: which.min() returns position of minimum value
+best_row <- which.min(cp_tbl[, "xerror"])    # Find min "xerror"
+cp_min   <- cp_tbl[best_row, "CP"]           # Get CP at best row
+xerr_min <- cp_tbl[best_row, "xerror"]       # Get xerror at best row
+xerr_se  <- cp_tbl[best_row, "xstd"]         # Get xstd at best row
+
+# Apply 1-standard-error rule
+# HINT: max() finds the largest value meeting the condition
+cp_1se <- max(
+  cp_tbl[
+    cp_tbl[, "xerror"] <= (xerr_min + xerr_se),  # xerr_min + xerr_se
+    "CP"
+  ]
+)
+
+# ============================================================================
+# STEP 3: PRUNE THE TREE TO OPTIMAL SIZE
+# ============================================================================
+
+# Remove unnecessary branches
+# HINT: prune() simplifies tree using CP threshold
+cart <- prune(
+  cart0,          # Original tree (cart0)
+  cp = cp_1se      # Optimal CP (cp_1se)
+)
+
+# ============================================================================
+# STEP 4: VISUALIZE THE DECISION TREE
+# ============================================================================
+
+# Create graphical representation
+# HINT: type, extra, under, fallen.leaves control appearance
+rpart.plot(
+  cart,                   # Pruned tree (cart)
+  type = 2,            # 2 shows split variables
+  extra = 104,           # 104 shows probabilities and percentages
+  under = TRUE,           # TRUE places info under boxes
+  fallen.leaves = TRUE    # TRUE aligns terminal nodes at bottom
+)
+
+# ============================================================================
+# STEP 5: IDENTIFY MOST IMPORTANT CLIMATE PREDICTORS
+# ============================================================================
+
+# Extract variable importance scores
+cart_vi <- data.frame(
+  Variable = names(cart$variable.importance),      # From cart
+  Importance = as.numeric(cart$variable.importance) # From cart
+)
+
+# Sort from most to least important
+# HINT: order() with negative value sorts descending
+cart_vi <- cart_vi[order(-(cart_vi$Importance)), ]  # Sort by -Importance
+
+# Display top predictors
+head(cart_vi, 10)  # Show first 6 or 10 rows
+```
+
+**Reflection Questions:**
+
+1. Why does pruning usually improve out-of-sample performance even if training accuracy drops?
+because it makes the tree simpler and thereby the focus on major patterns increases, with droping training accuracy smaller patterns could be overseen.
+2. What does the `xerror` in the CP table represent, and how does it differ from external 10-fold CV?
+it means the realtive error of each node while the external means the complete data set and doesnt focus on indi´vidual nodes.
+3. How can the 1-SE choice be justified when describing results?
+It is the simplest Tree with a error that is in the margin of one to the minimum error. So thereby its the most simplest tree with less errors. SO it should be the perfect trade of between simplicity and error. 
+---
+
+## Task 3b – CART: External 10-Fold Cross-Validation (10 min)
+
+**Objective:**
+
+External 10-fold cross-validation provides an honest assessment of how well the CART model predicts TBMF on completely new data.
+
+**Performance metrics definitions:**
+
+- **Accuracy**: Percentage of correct predictions (both present and absent)
+- **Sensitivity**: Of locations truly having TBMF, percentage correctly identified
+- **Specificity**: Of locations truly lacking TBMF, percentage correctly identified
+- **Balanced Accuracy**: Average of sensitivity and specificity, giving equal weight to both classes
+
+
+```{r}
+# External 10-fold cross-validation
+# HINT: make_folds() creates fold indices, k = number of folds
+# Helper: 10-fold CV splitter
+make_folds <- function(n, k = 10) {
+  folds <- sample(rep(1:k, length.out = n))
+  split(seq_len(n), folds)
+}
+
+folds <- make_folds(nrow(dat), k = 10)  # Number of rows in dat, 10 folds
+
+# HINT: lapply() applies function to each fold
+cart_cv <- do.call(rbind, lapply(folds, function(idx_test){
+  # Split into training and test sets
+  # HINT: -idx_test means "all rows except test indices"
+  tr <- dat[-idx_test, ]          # Training: all except test indices
+  te <- dat[idx_test,  ]          # Test: only test indices
+  
+  # Train model on training set
+  m  <- rpart(form, data = tr, method = "class", xval = 10, 
+              control = rpart.control(cp = 0.01))
+  
+  # Predict on test set
+  # HINT: predict() with type="prob" gives probabilities
+  p  <- predict(m, newdata = te, type = "prob")[, "1"]
+  
+  # Store results
+  data.frame(ID = te$ID, TBMF = te$TBMF, prob = p)
+}))
+
+# Helper: accuracy metrics from a confusion table (binary, positive = 1)
+# INPUTS:
+#   truth - actual values (0 or 1) from the dataset
+#   prob  - predicted probabilities (0 to 1) from the model
+#   thr   - threshold for converting probabilities to predictions (default 0.5)
+# OUTPUTS:
+#   data frame with 4 metrics: Accuracy, Sensitivity, Specificity, BalancedAccuracy
+acc_metrics <- function(truth, prob, thr = 0.5) {
+  # Convert probabilities to binary predictions using threshold
+  # If probability >= threshold, predict 1 (present), otherwise predict 0 (absent)
+  pred <- ifelse(prob >= thr, 1, 0)
+  # ============================================================================
+  # CALCULATE CONFUSION MATRIX COMPONENTS
+  # ============================================================================
+  # True Positives (TP): Correctly predicted as present
+  # Both truth and prediction are 1
+  TP <- sum(truth == 1 & pred == 1)
+  # True Negatives (TN): Correctly predicted as absent
+  # Both truth and prediction are 0
+  TN <- sum(truth == 0 & pred == 0)
+  # False Positives (FP): Incorrectly predicted as present
+  # Truth is 0 but prediction is 1 (Type I error)
+  FP <- sum(truth == 0 & pred == 1)
+  # False Negatives (FN): Incorrectly predicted as absent
+  # Truth is 1 but prediction is 0 (Type II error)
+  FN <- sum(truth == 1 & pred == 0)
+  # ============================================================================
+  # CALCULATE PERFORMANCE METRICS
+  # ============================================================================
+  # ACCURACY: Proportion of all predictions that were correct
+  # Formula: (TP + TN) / Total
+  # Interpretation: Overall correctness across both classes
+  acc <- (TP + TN) / (TP + TN + FP + FN)
+  
+  # SENSITIVITY (Recall, True Positive Rate):
+  # Of all actual positives, what proportion did we correctly identify?
+  # Formula: TP / (TP + FN)
+  # Interpretation: How good at finding what's really there
+  # ifelse() prevents division by zero if no actual positives exist
+  sens <- ifelse((TP + FN) == 0, NA, TP / (TP + FN))
+  # SPECIFICITY (True Negative Rate):
+  # Of all actual negatives, what proportion did we correctly identify?
+  # Formula: TN / (TN + FP)
+  # Interpretation: How good at confirming what's really absent
+  # ifelse() prevents division by zero if no actual negatives exist
+  spec <- ifelse((TN + FP) == 0, NA, TN / (TN + FP))
+  # BALANCED ACCURACY:
+  # Average of sensitivity and specificity
+  # Gives equal weight to both classes regardless of class imbalance
+  # na.rm = TRUE handles cases where sensitivity or specificity is NA
+  bal_acc <- mean(c(sens, spec), na.rm = TRUE)
+  # ============================================================================
+  # RETURN RESULTS
+  # ============================================================================
+  # Return all metrics as a single-row data frame
+  data.frame(
+    Accuracy = acc, 
+    Sensitivity = sens, 
+    Specificity = spec, 
+    BalancedAccuracy = bal_acc
+  )
+}
+
+# Calculate performance metrics
+# HINT: acc_metrics() needs true values, predictions, threshold (set to 0.5)
+cart_cv_metrics <- acc_metrics(cart_cv$TBMF, cart_cv$prob, thr = 0.5)
+cart_cv_metrics
+```
+
+**Reflection Questions:**
+
+1. Why is nested cross-validation necessary (both internal `xval=10` within `rpart` AND external CV)? What would go wrong with only one level?
+You need to acess both sides so you dont get a bias, overfitted data.
+2. How should the 0.5 probability threshold used in the `acc_metrics` function be chosen depending on whether the goal is conservation planning, ecological research, or climate change prediction?
+As 0.5 threshold says that the cost for false positive and negative is equal and this is nearly never the case in natural systems, you should lower the threshold so it is more sensitive and we can see better the changes in dynamics and get like an early alert system. Better be safe then sorry.
+3. Does random folding violate independence assumptions when nearby locations have similar climates and biomes (spatial autocorrelation)?
+Yes that can give an unnecessary bias towards oen climate region.
+---
+
+## Task 4 – Random Forest (18–20 min)
+
+**Objective:**
+
+A Random Forest model is built—an ensemble of many decision trees that "vote" on predictions. The key parameter (`mtry`) is optimized, performance is evaluated through cross-validation, and the most important climate predictors are identified.
+
+```{r}
+# ============================================================================
+# STEP 1: OPTIMIZE THE mtry PARAMETER
+# ============================================================================
+
+# Count climate predictor variables
+p <- length(pred_cols)  # Number of predictor columns
+
+# Create grid of mtry values to test
+# HINT: seq() creates sequence, pmax() ensures minimum of 1
+mtry_grid <- round(seq(1, p, length.out = 7)) # From 1 to p, create 7 values minimum
+
+# Test each mtry value
+# HINT: sapply() applies function to each element
+oob <- sapply(mtry_grid, function(m) {  # Loop through mtry_grid
+  # Build Random Forest
+  # HINT: ntree = number of trees, mtry = variables per split
+  rf_tmp <- randomForest(
+    x = dat[, pred_cols],            # Predictor columns
+    y = as.factor(dat$TBMF),    # Response as factor to make 
+    ntree = 500,               # Number of trees (500)
+    mtry = m,                # Current mtry value (m)
+    importance = TRUE           # Calculate importance? (TRUE)
+  )
+  
+  # Extract OOB error
+  # HINT: Access error rate matrix, last row, "OOB" column
+  rf_tmp$err.rate[rf_tmp$ntree, "OOB"]
+})
+
+# Organize results
+oob_df <- data.frame(mtry = mtry_grid, OOB_Error = oob)
+oob_df
+
+# Select mtry with lowest OOB error
+best_mtry <- oob_df$mtry[which.min(oob_df$OOB_Error)]
+
+# ============================================================================
+# STEP 2: BUILD THE FINAL RANDOM FOREST MODEL
+# ============================================================================
+
+# Train Random Forest using optimal mtry
+rf <- randomForest(
+  x = dat[ ,pred_cols],                   # Predictors from dat
+  y = dat$TBMF,                   # Response (TBMF as factor)
+  ntree = 500,               # Number of trees (500)
+  mtry = best_mtry,                # Optimal mtry
+  importance = TRUE,          # TRUE
+  keep.forest = TRUE          # TRUE to save for predictions
+)
+
+# ============================================================================
+# STEP 3: EXTERNAL 10-FOLD CROSS-VALIDATION
+# ============================================================================
+
+rf_cv <- do.call(rbind, 
+  lapply(folds, function(idx_test){  # Use folds from before
+    tr <- dat[-idx_test, ]
+    te <- dat[idx_test, ]
+    
+    # Train Random Forest
+    m <- randomForest(
+      x = tr[, pred_cols],
+      y = as.factor(tr$TBMF),
+      ntree = 500,
+      mtry = best_mtry,              # Use best_mtry
+      importance = TRUE,
+      keep.forest = TRUE
+    )
+    
+    # Predict on test fold
+    p <- predict(m, newdata = te, type = "prob")[, "1"]
+    
+    data.frame(ID = te$ID, TBMF = te$TBMF, prob = p)
+  })
+)
+
+# Calculate performance metrics
+rf_cv_metrics <- acc_metrics(rf_cv$TBMF, rf_cv$prob, thr = 0.5)
+rf_cv_metrics
+
+# ============================================================================
+# STEP 4: VARIABLE IMPORTANCE
+# ============================================================================
+
+# Extract importance scores
+# HINT: importance() function extracts from rf object
+rf_vi <- data.frame(
+  Variable = rownames(importance(m)),
+  MeanDecreaseGini = importance(m)[, "MeanDecreaseGini"],
+  MeanDecreaseAccuracy = importance(m)[, "MeanDecreaseAccuracy"]
+)
+
+# Sort by Gini importance
+rf_vi <- rf_vi[order(-rf_vi$MeanDecreaseGini), ]  # Sort descending
+
+# Display top 10
+head(rf_vi, 10)
+```
+
+
+**Reflection Questions:**
+
+1. Why can OOB error serve as a trustworthy proxy for cross-validation in Random Forests?
+Because it takes in to account all the data that is not used for training the model.
+2. How does `mtry` influence the bias–variance trade-off?
+As mtry determines how many predictor values are used in every split so a high mtry value means the use of a lot of random values and thereby a quite low bias but high correlation between trees.
+3. What does the optimal `mtry` value reveal about climate-biome relationship complexity?
+i dont know as the code doesnt work
+4. For conservation planning, would students recommend the interpretable CART model or the more accurate but "black box" Random Forest?
+i dont know as the code doesnt work
+---
+

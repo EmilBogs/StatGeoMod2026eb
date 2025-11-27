@@ -1,0 +1,159 @@
+---
+title: "Title"
+author: "Emil Bogs"
+date: "`r Sys.Date()`"
+bibliography: "TestBibTex.bib"
+output:
+  bookdown::html_document2:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# install packages
+install.packages(c("dplyr","ggplot2","knitr","tidyverse"))
+# load packages
+library("tidyverse")
+library("knitr")  
+library("ggplot2")
+library("dplyr")
+```
+
+## Adapting the YAML metadata field
+
+**Task 1:**
+
+# Why use `R` in Ecology
+
+TEXT HERE
+
+```{r}
+# CODE HERE
+```
+
+::: {.alert .alert-warning}
+## Abstract
+
+The programming language R is widely used in many fields. We explored the extent of reported R use in the field of ecology using the Web of Science and text mining. We analyzed the frequencies of R packages reported in more than 60,000 peer-reviewed articles published in 30 ecology journals during a 10-yr period ending in 2017. The number of studies reported using R as their primary tool in data analysis increased linearly from 11.4% in 2008 to 58.0% in 2017. The top 10 packages reported were `lme4`, `vegan`, `nlme`, `ape`, `MuMIn`, `MASS`, `mgcv`, `ade4`, `multcomp`, and `car`. The increasing popularity of R has most likely furthered open science in ecological research because it can improve reproducibility of analyses and captures workflows when scripts and codes are included and shared. These findings may not be entirely unique to R because there are other programming languages used by ecologists, but they do strongly suggest that given the relatively high frequency of reported use of R, it is a significant component of contemporary analytics in the field of ecology.
+:::
+
+### Add Sections and Format the Text
+
+**Task 2:**
+
+TEXT HERE
+
+```{r}
+# CODE HERE
+```
+
+## Analysis
+
+### Analysis section - Load and expore the data.
+
+```{r loadData}
+Articles_Use <- read.csv("./Data/Articles_Use.csv")
+head(Articles_Use) # Check if import worked correctly
+names(Articles_Use) # Check the names in the Dataset
+str(Articles_Use) # Check class of variables
+
+```
+
+### Analysis section - Your First Analysis
+
+**Task 4**:
+
+TEXT HERE
+
+```{r statArticles}
+total_articles <- sum(Articles_Use$Total_Number_Articles, na.rm = TRUE) # check how many Articles were used for the dataset
+
+# average (mean), minimum (min), maximum (max)
+average_articles <- mean(Articles_Use$Total_Number_Articles, 
+                         na.rm = TRUE)
+minimum_articles <- min(Articles_Use$Total_Number_Articles, 
+                         na.rm = TRUE)
+maximum_articles <- max(Articles_Use$Total_Number_Articles, 
+                         na.rm = TRUE)
+
+# The journal (Journal) with the highest number of articles (the row with the greatest value in the Total_Number_Articles column) 
+
+Top_Journal <-
+Articles_Use$Journal[which(
+                     Articles_Use$Total_Number_Articles == 
+                     max(Articles_Use$Total_Number_Articles, na.rm = TRUE))]
+Top_Journal
+```
+
+```{r JournalRanking}
+
+journal_ranking <- 
+                    Articles_Use[order(Articles_Use$IF_2017, decreasing = T),
+                    c("Journal", "IF_2017", "Total_Number_Articles")]
+journal_ranking
+```
+
+\## First real Analysis
+
+```{r loadData02}
+MeanPercent2008_2017 <- read.csv("./Data/MeanPercent2008_2017.csv")
+head(MeanPercent2008_2017) # Check if import worked correctly
+names(MeanPercent2008_2017) # Check the names in the Dataset
+str(MeanPercent2008_2017) # Check class of variables
+```
+
+```{r Analysis_MeanPercent2008_2017}
+
+# Determine Pearson Correlation
+  correlation_result <- cor.test(MeanPercent2008_2017$Year, # Var_1: Year
+                                 MeanPercent2008_2017$Articles.Using.R) # Var_2: Percentage of R usage
+  correlation_result
+```
+
+```{r fig-lmModel, fig.cap = "Blahahahaha"}
+# 
+   Model.1 <- lm(Articles.Using.R ~ Year, # The regression 
+                 data = MeanPercent2008_2017) # The data
+
+# 
+   annual_rate_increase <- coef(Model.1)[2] # Extract the annual rate of increase 
+   annual_rate_increase
+
+# plot the correlation
+   plot(Articles.Using.R ~ Year, data = MeanPercent2008_2017)
+   abline(Model.1,  # The linear model object
+          col = "red",  # The color of the line
+          lty = 2     # A dashed line type
+   )
+```
+It is so and so and you can see it in (\@ref(fig:fig-lmModel))
+
+### Analysis section - Add a Figure from an Image File
+
+**Task 5**:
+
+TEXT HERE
+
+```{r importimage, fig.cap= "R Packages reported use frequency in 30 main ecology journals"}
+# Here the caption has to be part of the R chunk header fig.cap = "caption"
+knitr::include_graphics("./Data/PopularPackages.png") 
+
+
+```
+
+### Analysis section - Create a Table
+
+**Task 6**:
+
+TEXT HERE
+
+```{r}
+# CODE HERE
+```
+
+##Summary
+
+The total number of Articles is `r total_articles`.
